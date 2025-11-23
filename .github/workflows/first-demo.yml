@@ -1,0 +1,14 @@
+name: my first flow
+
+on: push
+
+jobs:
+    first-job:
+        runs-on: ubuntu-latest
+        steps:
+        - name: Welcome Message
+          run: echo "my first peoject"
+        
+        - name: list files
+          run: ls
+        
