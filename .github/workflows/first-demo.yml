@@ -8,10 +8,10 @@ jobs:
         steps:
         - name: checkout repo
           uses: actions/checkout@v5
-          
+
         - name: Welcome Message
           run: echo "my first peoject"
         
         - name: list files
-          run: ls
+          run: ls -a
         
