@@ -14,4 +14,16 @@ jobs:
             chmod +x demo.sh
             ./demo.sh
 
+    Test-job:
+        runs-on: unbuntu-latest
+        steps:
+        - name: Echo Msg
+          run: echo "heelo testing job"
+
+    deploy-job:
+        runs-on: ubuntu-latest
+        steps:
+        - name: Display message
+          run: echo "deploying app"
+
         
