@@ -10,8 +10,6 @@ jobs:
           uses: actions/checkout@v5
 
         - name: Welcome Message
-          run: echo "my first peoject"
-        
-        - name: list files
-          run: ls -a
+          run: ./demo.sh
+          
         
