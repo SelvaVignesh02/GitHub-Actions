@@ -15,12 +15,14 @@ jobs:
             ./demo.sh
 
     Test-job:
-        runs-on: unbuntu-latest
+        needs: first-job
+        runs-on: ubuntu-latest
         steps:
         - name: Echo Msg
           run: echo "heelo testing job"
 
     deploy-job:
+        needs: Test-job
         runs-on: ubuntu-latest
         steps:
         - name: Display message
