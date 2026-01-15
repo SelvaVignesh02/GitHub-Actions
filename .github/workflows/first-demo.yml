@@ -19,7 +19,7 @@ jobs:
         runs-on: ubuntu-latest
         steps:
         - name: Echo Msg
-          run: echo "heelo testing job"
+          run: echo "heelo testing job 1"
 
     deploy-job:
         needs: Test-job
@@ -27,5 +27,6 @@ jobs:
         steps:
         - name: Display message
           run: echo "deploying app"
+
 
         
