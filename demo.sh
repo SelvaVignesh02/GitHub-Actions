@@ -2,3 +2,4 @@
 
 free -m
 df -h
+cpu
