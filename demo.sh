@@ -1,4 +1,3 @@
 #!/bin/bash
 
-free -m
-df -h
+sudo systemctl restart jenkins
