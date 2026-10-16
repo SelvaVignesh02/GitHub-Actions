@@ -33,7 +33,7 @@ jobs:
         run: |
           docker build \
             -t trivy-demo:${{ github.sha }} \
-            ./trivy-demo
+            .
 
       - name: Scan image and generate JSON report
         uses: aquasecurity/trivy-action@v0.36.0
