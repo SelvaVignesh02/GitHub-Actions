@@ -1,0 +1,62 @@
+
+version: 0.2
+
+env:
+  variables:
+    IMAGE_TO_SCAN: "nginx:1.27.0"
+    TRIVY_VERSION: "0.64.1"
+
+phases:
+  install:
+    commands:
+      - |
+        set -eu
+        mkdir -p reports
+
+        echo "Installing Trivy..."
+        curl -fsSL \
+          "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+          -o /tmp/trivy.tar.gz
+
+        tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
+        install /tmp/trivy /usr/local/bin/trivy
+        trivy --version
+
+  pre_build:
+    commands:
+      - |
+        set -eu
+        echo "Pulling image: ${IMAGE_TO_SCAN}"
+        docker pull "${IMAGE_TO_SCAN}"
+
+  build:
+    commands:
+      - |
+        set -eu
+
+        echo "Scanning image and generating JSON..."
+        trivy image \
+          --scanners vuln \
+          --format json \
+          --output reports/trivy-results.json \
+          "${IMAGE_TO_SCAN}"
+
+        echo "Converting results to readable table..."
+        trivy convert \
+          --format table \
+          --output reports/trivy-results.txt \
+          reports/trivy-results.json
+
+        echo "Generating SARIF report..."
+        trivy convert \
+          --format sarif \
+          --output reports/trivy-results.sarif \
+          reports/trivy-results.json
+
+        echo "Scan completed. Reports:"
+        ls -lh reports/
+
+artifacts:
+  files:
+    - reports/**/*
+  discard-paths: no
