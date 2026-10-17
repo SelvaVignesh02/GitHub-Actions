@@ -1,9 +1,14 @@
+
 version: 0.2
 
 env:
   variables:
     UI_IMAGE: "nginx:1.27.0"
     API_IMAGE: "bkimminich/juice-shop:latest"
+
+    MAX_CRITICAL: "0"
+    MAX_HIGH: "5"
+    MAX_MEDIUM: "10"
 
 phases:
   install:
@@ -25,6 +30,9 @@ phases:
         command -v trivy
         trivy --version
 
+        echo "Checking Python..."
+        python3 --version
+
   pre_build:
     commands:
       - |
@@ -33,6 +41,9 @@ phases:
         echo "========== IMAGE SCAN CONFIGURATION =========="
         echo "UI image: ${UI_IMAGE}"
         echo "API image: ${API_IMAGE}"
+        echo "Maximum CRITICAL: ${MAX_CRITICAL}"
+        echo "Maximum HIGH: ${MAX_HIGH}"
+        echo "Maximum MEDIUM: ${MAX_MEDIUM}"
 
         echo "Checking Docker..."
         docker --version
@@ -49,7 +60,7 @@ phases:
         set -u
 
         # Scan an image and generate reports.
-        # Vulnerabilities do not stop report generation.
+        # Do not fail immediately when Trivy returns a non-zero status.
         scan_image() {
           NAME="$1"
           IMAGE="$2"
@@ -86,7 +97,8 @@ phases:
             --output "${DIR}/trivy-results.sarif" \
             "${DIR}/trivy-results.json" || true
 
-          echo "Generating image summary..."
+          echo "Generating per-image summary..."
+
           python3 - "${DIR}/trivy-results.json" \
             "${DIR}/scan-summary.txt" "${IMAGE}" <<'PY'
         import json
@@ -106,18 +118,20 @@ phases:
                 counts[vuln.get("Severity", "UNKNOWN").upper()] += 1
 
         severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]
-        total = sum(counts.values())
 
         lines = [
             "Trivy Image Vulnerability Scan Summary",
             "======================================",
             f"Image: {image}",
             f"Scan date (UTC): {datetime.now(timezone.utc).isoformat()}",
-            f"Total vulnerabilities: {total}",
+            f"Total vulnerabilities: {sum(counts.values())}",
             ""
         ]
 
-        lines.extend(f"{severity}: {counts[severity]}" for severity in severities)
+        lines.extend(
+            f"{severity}: {counts[severity]}"
+            for severity in severities
+        )
 
         with open(summary_file, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
@@ -131,58 +145,118 @@ phases:
           return 0
         }
 
-        # Scan both images even if the first scan returns an error.
+        # Attempt both scans, even if one scan fails.
         scan_image "ui" "${UI_IMAGE}" || true
         scan_image "api" "${API_IMAGE}" || true
 
         echo ""
-        echo "========== GENERATING COMBINED SUMMARY =========="
+        echo "========== GENERATING COMBINED SUMMARY AND POLICY RESULT =========="
 
         python3 - <<'PY'
         import json
         import os
         from collections import Counter
 
-        counts = Counter()
+        limits = {
+            "CRITICAL": int(os.getenv("MAX_CRITICAL", "0")),
+            "HIGH": int(os.getenv("MAX_HIGH", "5")),
+            "MEDIUM": int(os.getenv("MAX_MEDIUM", "10")),
+        }
+
+        overall_counts = Counter()
         errors = []
+        violations = []
+
+        lines = [
+            "Trivy Vulnerability Threshold Report",
+            "====================================",
+            ""
+        ]
 
         for name in ("ui", "api"):
             directory = f"reports/{name}"
             json_file = f"{directory}/trivy-results.json"
+            error_file = f"{directory}/scan-error.txt"
+            status_file = f"{directory}/scan-exit-code.txt"
 
-            if os.path.exists(f"{directory}/scan-error.txt") or not os.path.isfile(json_file):
+            lines.append(f"Image: {name.upper()}")
+
+            scan_failed = (
+                os.path.exists(error_file)
+                or not os.path.isfile(json_file)
+            )
+
+            if os.path.isfile(status_file):
+                with open(status_file, encoding="utf-8") as f:
+                    if f.read().strip() != "0":
+                        scan_failed = True
+
+            if scan_failed:
                 errors.append(name)
+                lines.extend(["Scan status: ERROR", ""])
                 continue
 
-            with open(json_file, encoding="utf-8") as f:
-                data = json.load(f)
+            try:
+                with open(json_file, encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError) as exc:
+                errors.append(name)
+                lines.extend([f"Scan status: ERROR - {exc}", ""])
+                continue
+
+            counts = Counter()
 
             for result in data.get("Results") or []:
                 for vuln in result.get("Vulnerabilities") or []:
                     counts[vuln.get("Severity", "UNKNOWN").upper()] += 1
 
-        severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]
+            lines.append("Scan status: SUCCESS")
 
-        lines = [
-            "Combined Trivy Image Vulnerability Summary",
-            "==========================================",
-            ""
-        ]
+            for severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"):
+                lines.append(f"{severity}: {counts[severity]}")
+                overall_counts[severity] += counts[severity]
 
-        lines.extend(f"{severity}: {counts[severity]}" for severity in severities)
+            for severity, limit in limits.items():
+                actual = counts[severity]
+
+                if actual > limit:
+                    violations.append(
+                        f"{name.upper()}: {severity} count {actual} "
+                        f"exceeds allowed maximum {limit}"
+                    )
+
+            lines.append("")
+
         lines.extend([
-            "",
-            f"Total vulnerabilities: {sum(counts.values())}",
-            f"Images with scan errors: {', '.join(errors) if errors else 'None'}"
+            "OVERALL VULNERABILITY COUNTS",
+            "----------------------------"
         ])
 
-        print("\n".join(lines))
+        for severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"):
+            lines.append(f"{severity}: {overall_counts[severity]}")
+
+        lines.extend(["", "THRESHOLD VIOLATIONS"])
+
+        if violations:
+            lines.extend(f"FAIL: {item}" for item in violations)
+        else:
+            lines.append("None")
+
+        lines.append(
+            f"Scan errors: {', '.join(errors) if errors else 'None'}"
+        )
+
+        failed = bool(errors or violations)
+        lines.extend([
+            "",
+            f"POLICY RESULT: {'FAIL' if failed else 'PASS'}"
+        ])
+
+        report = "\n".join(lines) + "\n"
+        print(report)
 
         with open("reports/combined-summary.txt", "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
-
-        # Fail the build if a scan failed or a report is missing.
-        failed = bool(errors)
+            f.write(report)
 
         with open("reports/policy-result.txt", "w", encoding="utf-8") as f:
             f.write("FAIL\n" if failed else "PASS\n")
@@ -202,21 +276,21 @@ phases:
         cat reports/combined-summary.txt 2>/dev/null || true
 
         echo ""
-        echo "========== SCAN STATUS =========="
+        echo "========== SECURITY POLICY =========="
         cat reports/policy-result.txt 2>/dev/null || true
 
         echo ""
         echo "========== FINAL REPORT FILES =========="
         find reports -type f -exec ls -lh {} \;
 
-        echo "Reports are available as configured CodeBuild artifacts."
+        echo "Reports generated. CodeBuild will attempt artifact upload."
 
         if [ "$(cat reports/build-exit-code.txt 2>/dev/null || echo 1)" != "0" ]; then
-          echo "BUILD FAILED: One or more image scans failed."
+          echo "BUILD FAILED: Scan error or vulnerability threshold exceeded."
           exit 1
         fi
 
-        echo "BUILD COMPLETED: Both image scans generated reports."
+        echo "BUILD PASSED: All image scans are within configured thresholds."
 
 artifacts:
   files:
