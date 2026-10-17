@@ -4,25 +4,26 @@ version: 0.2
 env:
   variables:
     IMAGE_TO_SCAN: "nginx:1.27.0"
-    TRIVY_VERSION: "0.64.1"
 
 phases:
   install:
     commands:
       - |
         set -eu
-        
         mkdir -p reports
-        
+
+        echo "Downloading Trivy installer..."
+        curl -fSL --retry 3 \
+          https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+          -o /tmp/install-trivy.sh
+
         echo "Installing Trivy..."
-        
-        TRIVY_VERSION="${TRIVY_VERSION:-0.76.0}"
-        
-        curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-          | sh -s -- -b /usr/local/bin "v${TRIVY_VERSION}"
-        
+        sh -x /tmp/install-trivy.sh -b /usr/local/bin
+
+        echo "Verifying installation..."
+        command -v trivy
         trivy --version
-        
+
   pre_build:
     commands:
       - |
@@ -34,7 +35,6 @@ phases:
     commands:
       - |
         set -eu
-
         echo "Scanning image and generating JSON..."
         trivy image \
           --scanners vuln \
@@ -42,7 +42,7 @@ phases:
           --output reports/trivy-results.json \
           "${IMAGE_TO_SCAN}"
 
-        echo "Converting results to readable table..."
+        echo "Converting JSON to table..."
         trivy convert \
           --format table \
           --output reports/trivy-results.txt \
@@ -54,7 +54,7 @@ phases:
           --output reports/trivy-results.sarif \
           reports/trivy-results.json
 
-        echo "Scan completed. Reports:"
+        echo "Scan completed:"
         ls -lh reports/
 
 artifacts:
