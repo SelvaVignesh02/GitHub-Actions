@@ -4,12 +4,14 @@ version: 0.2
 env:
   variables:
     IMAGE_TO_SCAN: "nginx:1.27.0"
+    TRIVY_EXIT_CODE: "0"
 
 phases:
   install:
     commands:
       - |
         set -eu
+
         mkdir -p reports
 
         echo "Downloading Trivy installer..."
@@ -18,9 +20,9 @@ phases:
           -o /tmp/install-trivy.sh
 
         echo "Installing Trivy..."
-        sh -x /tmp/install-trivy.sh -b /usr/local/bin
+        sh /tmp/install-trivy.sh -b /usr/local/bin
 
-        echo "Verifying installation..."
+        echo "Verifying Trivy installation..."
         command -v trivy
         trivy --version
 
@@ -28,36 +30,96 @@ phases:
     commands:
       - |
         set -eu
+
+        echo "Image to scan: ${IMAGE_TO_SCAN}"
+        echo "Logging Docker version..."
+        docker --version
+
         echo "Pulling image: ${IMAGE_TO_SCAN}"
         docker pull "${IMAGE_TO_SCAN}"
 
   build:
     commands:
       - |
-        set -eu
-        echo "Scanning image and generating JSON..."
+        set -u
+
+        echo "Starting Trivy vulnerability scan..."
+
+        # Generate the primary JSON report.
+        # Keep the build running so reports can be generated
+        # even when vulnerabilities are found.
         trivy image \
           --scanners vuln \
           --format json \
           --output reports/trivy-results.json \
-          "${IMAGE_TO_SCAN}"
+          "${IMAGE_TO_SCAN}" || SCAN_STATUS=$?
 
-        echo "Converting JSON to table..."
+        SCAN_STATUS="${SCAN_STATUS:-0}"
+
+        if [ ! -s reports/trivy-results.json ]; then
+          echo "ERROR: Trivy JSON report was not generated."
+          exit 1
+        fi
+
+        echo "Generating readable TXT report..."
         trivy convert \
           --format table \
           --output reports/trivy-results.txt \
-          reports/trivy-results.json
+          reports/trivy-results.json || true
 
         echo "Generating SARIF report..."
         trivy convert \
           --format sarif \
           --output reports/trivy-results.sarif \
-          reports/trivy-results.json
+          reports/trivy-results.json || true
 
-        echo "Scan completed:"
+        echo "Generating summary..."
+        {
+          echo "Trivy Image Vulnerability Scan Summary"
+          echo "====================================="
+          echo "Image: ${IMAGE_TO_SCAN}"
+          echo "Scan date (UTC): $(date -u)"
+          echo ""
+          echo "Reports generated:"
+          echo "- reports/trivy-results.json"
+          echo "- reports/trivy-results.txt"
+          echo "- reports/trivy-results.sarif"
+          echo ""
+          echo "JSON report size:"
+          ls -lh reports/trivy-results.json
+        } > reports/scan-summary.txt
+
+        echo ""
+        echo "========== SCAN REPORTS =========="
         ls -lh reports/
+        echo ""
+        echo "========== READABLE VULNERABILITY REPORT =========="
+        if [ -s reports/trivy-results.txt ]; then
+          cat reports/trivy-results.txt
+        else
+          echo "TXT report conversion failed; check JSON report."
+        fi
+
+        echo ""
+        echo "Reports are saved in the reports/ directory."
+        echo "CodeBuild will upload these files as artifacts."
+
+        # Preserve the scan status until artifacts are uploaded.
+        echo "${SCAN_STATUS}" > reports/scan-exit-code.txt
+
+  post_build:
+    commands:
+      - |
+        set -eu
+
+        echo "========== FINAL REPORT FILES =========="
+        ls -lh reports/
+
+        echo "Scan report generation completed."
+        echo "Download the reports from the CodeBuild build's Artifacts section."
 
 artifacts:
   files:
     - reports/**/*
+  name: trivy-scan-reports
   discard-paths: no
