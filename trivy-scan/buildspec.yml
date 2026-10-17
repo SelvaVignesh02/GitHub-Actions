@@ -14,12 +14,15 @@ phases:
       - |
         set -eu
 
+        mkdir -p reports/ui reports/api
+
         echo "Checking required tools..."
         command -v curl
         command -v tar
         command -v docker
+        command -v python3
 
-        echo "Downloading Trivy ${TRIVY_VERSION}..."
+        echo "Downloading Trivy version ${TRIVY_VERSION}..."
         curl -fSL --retry 3 \
           "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
           -o /tmp/trivy.tar.gz
@@ -29,24 +32,21 @@ phases:
 
         install -m 0755 /tmp/trivy /usr/local/bin/trivy
 
-        echo "Verifying Trivy..."
+        echo "Verifying installation..."
         trivy --version
         docker --version
-
+        python3 --version
 
   pre_build:
     commands:
       - |
-        set -eu
-        echo "Pulling UI image: ${UI_IMAGE}"
-        docker pull "${UI_IMAGE}"
-
-        echo "Pulling API image: ${API_IMAGE}"
-        if [ "${API_IMAGE}" = "REPLACE_WITH_MINESPIDER_API_IMAGE:TAG" ]; then
-          echo "ERROR: Update API_IMAGE with the actual image and tag."
-          exit 1
-        fi
-        docker pull "${API_IMAGE}"
+        echo "======================================"
+        echo "Trivy Docker Image Vulnerability Scan"
+        echo "======================================"
+        echo "UI image: ${UI_IMAGE}"
+        echo "API image: ${API_IMAGE}"
+        echo "Reports directory: reports/"
+        echo "Vulnerability policy: ${FAIL_ON_HIGH_CRITICAL}"
 
   build:
     commands:
@@ -59,38 +59,58 @@ phases:
           DIR="reports/${NAME}"
 
           mkdir -p "${DIR}"
-          echo "========================================"
-          echo "Scanning ${NAME}: ${IMAGE}"
-          echo "========================================"
 
-          # JSON report is the source for all other reports.
-          if trivy image \
-              --scanners vuln \
-              --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
-              --format json \
-              --output "${DIR}/trivy-results.json" \
-              "${IMAGE}"; then
-            echo "JSON scan completed for ${NAME}"
-          else
-            echo "Trivy scan failed for ${NAME}" \
+          echo ""
+          echo "======================================"
+          echo "Scanning ${NAME}: ${IMAGE}"
+          echo "======================================"
+
+          # Pull the image; preserve the error and continue
+          # so the other image can still be scanned.
+          if ! docker pull "${IMAGE}"; then
+            echo "Image pull failed: ${IMAGE}" \
               | tee "${DIR}/scan-error.txt"
             echo "1" > "${DIR}/scan-error-code.txt"
             return 0
           fi
 
-          # Human-readable report.
-          trivy convert \
-            --format table \
-            --output "${DIR}/trivy-results.txt" \
-            "${DIR}/trivy-results.json" \
-            || echo "TXT conversion failed for ${NAME}"
+          # Generate the complete vulnerability JSON report.
+          if ! trivy image \
+              --scanners vuln \
+              --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+              --format json \
+              --output "${DIR}/trivy-results.json" \
+              "${IMAGE}"; then
 
-          # SARIF report for compatible security tools.
-          trivy convert \
-            --format sarif \
-            --output "${DIR}/trivy-results.sarif" \
-            "${DIR}/trivy-results.json" \
-            || echo "SARIF conversion failed for ${NAME}"
+            echo "Trivy scan failed: ${IMAGE}" \
+              | tee "${DIR}/scan-error.txt"
+            echo "1" > "${DIR}/scan-error-code.txt"
+            return 0
+          fi
+
+          echo "JSON report generated."
+
+          # Generate human-readable vulnerability table.
+          if trivy convert \
+              --format table \
+              --output "${DIR}/trivy-results.txt" \
+              "${DIR}/trivy-results.json"; then
+            echo "TXT report generated."
+          else
+            echo "TXT conversion failed." \
+              | tee "${DIR}/txt-conversion-error.txt"
+          fi
+
+          # Generate SARIF for compatible security tools.
+          if trivy convert \
+              --format sarif \
+              --output "${DIR}/trivy-results.sarif" \
+              "${DIR}/trivy-results.json"; then
+            echo "SARIF report generated."
+          else
+            echo "SARIF conversion failed." \
+              | tee "${DIR}/sarif-conversion-error.txt"
+          fi
 
           # Count vulnerabilities by severity.
           python3 - "${DIR}/trivy-results.json" \
@@ -113,27 +133,33 @@ phases:
         total = sum(counts.values())
 
         lines = [
-            "Trivy Image Vulnerability Scan Summary",
+            "Trivy Image Vulnerability Summary",
             f"Image: {image}",
             f"Total vulnerabilities: {total}",
             ""
         ]
 
-        lines.extend(f"{severity}: {counts[severity]}" for severity in severities)
+        lines.extend(
+            f"{severity}: {counts[severity]}"
+            for severity in severities
+        )
 
         with open(summary_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 
         print("\n".join(lines))
         PY
+
+          echo "0" > "${DIR}/scan-exit-code.txt"
         }
 
-        # Scan both images and continue so one scan failure
-        # does not prevent the other image from being checked.
+        # Scan both images independently.
         scan_image "ui" "${UI_IMAGE}"
         scan_image "api" "${API_IMAGE}"
 
-        # Combined summary and policy decision.
+        echo ""
+        echo "Creating combined vulnerability summary..."
+
         python3 - <<'PY'
         import json
         import os
@@ -159,56 +185,80 @@ phases:
                     counts[vuln.get("Severity", "UNKNOWN").upper()] += 1
 
         severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]
-        lines = ["Combined Trivy Vulnerability Summary", ""]
 
-        for severity in severities:
-            lines.append(f"{severity}: {counts[severity]}")
+        lines = [
+            "Combined Trivy Vulnerability Summary",
+            ""
+        ]
 
-        lines.append(f"Total: {sum(counts.values())}")
-        lines.append(f"Scan errors: {', '.join(scan_errors) if scan_errors else 'None'}")
+        lines.extend(
+            f"{severity}: {counts[severity]}"
+            for severity in severities
+        )
+
+        lines.extend([
+            f"Total vulnerabilities: {sum(counts.values())}",
+            f"Images with scan errors: {', '.join(scan_errors) if scan_errors else 'None'}"
+        ])
+
+        print("\n".join(lines))
 
         with open("reports/combined-summary.txt", "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
 
-        print("\n".join(lines))
+        critical_high = counts["CRITICAL"] + counts["HIGH"]
+        policy_enabled = (
+            os.getenv("FAIL_ON_HIGH_CRITICAL", "true").lower() == "true"
+        )
 
-        critical_or_high = counts["CRITICAL"] + counts["HIGH"]
-        policy_enabled = os.getenv("FAIL_ON_HIGH_CRITICAL", "true").lower() == "true"
-        failed = bool(scan_errors) or (policy_enabled and critical_or_high > 0)
+        failed = bool(scan_errors) or (
+            policy_enabled and critical_high > 0
+        )
 
         with open("reports/policy-result.txt", "w", encoding="utf-8") as f:
             f.write("FAIL\n" if failed else "PASS\n")
-            f.write(f"Critical + High: {critical_or_high}\n")
+            f.write(f"CRITICAL + HIGH: {critical_high}\n")
             f.write(f"Scan errors: {len(scan_errors)}\n")
 
         with open("reports/build-exit-code.txt", "w", encoding="utf-8") as f:
             f.write("1\n" if failed else "0\n")
         PY
 
-        echo "========== ALL REPORT FILES =========="
+        echo ""
+        echo "========== GENERATED REPORTS =========="
         find reports -type f -exec ls -lh {} \;
 
   post_build:
     commands:
       - |
         echo "========== COMBINED SUMMARY =========="
-        cat reports/combined-summary.txt || true
+        if [ -f reports/combined-summary.txt ]; then
+          cat reports/combined-summary.txt
+        fi
 
-        echo "========== POLICY RESULT =========="
-        cat reports/policy-result.txt || true
+        echo ""
+        echo "========== SECURITY POLICY =========="
+        if [ -f reports/policy-result.txt ]; then
+          cat reports/policy-result.txt
+        fi
 
-        echo "Reports will be uploaded as CodeBuild artifacts."
+        echo ""
+        echo "========== REPORT FILES =========="
+        find reports -type f -exec ls -lh {} \;
 
-        # Fail only after all scans and reports have been attempted.
+        echo ""
+        echo "CodeBuild will attempt to upload the configured artifacts."
+
+        # Fail only after report generation has been attempted.
         if [ "$(cat reports/build-exit-code.txt 2>/dev/null || echo 1)" != "0" ]; then
-          echo "BUILD FAILED: scan error or HIGH/CRITICAL vulnerability policy violation."
+          echo "BUILD FAILED: scan error or HIGH/CRITICAL vulnerability found."
           exit 1
         fi
 
-        echo "BUILD PASSED: no HIGH/CRITICAL vulnerabilities or scan errors."
+        echo "BUILD PASSED: security policy satisfied."
 
 artifacts:
   files:
-    - 'reports/**/*'
+    - "reports/**/*"
   name: trivy-image-scan-reports
   discard-paths: no
