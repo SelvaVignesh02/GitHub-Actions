@@ -23,18 +23,28 @@ phases:
         command -v python3
 
         echo "Downloading Trivy version ${TRIVY_VERSION}..."
+
         curl -fSL --retry 3 \
-          "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+          "https://get.trivy.dev/trivy?os=Linux&arch=64bit&version=${TRIVY_VERSION}&type=tar.gz" \
           -o /tmp/trivy.tar.gz
+
+        echo "Checking downloaded archive..."
+        ls -lh /tmp/trivy.tar.gz
+        tar -tzf /tmp/trivy.tar.gz
 
         echo "Extracting Trivy..."
         tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
 
+        chmod 0755 /tmp/trivy
         install -m 0755 /tmp/trivy /usr/local/bin/trivy
 
-        echo "Verifying installation..."
+        echo "Verifying Trivy installation..."
         trivy --version
+
+        echo "Verifying Docker..."
         docker --version
+
+        echo "Verifying Python..."
         python3 --version
 
   pre_build:
