@@ -13,19 +13,26 @@ phases:
     commands:
       - |
         set -eu
-        mkdir -p reports/ui reports/api
 
-        echo "Installing Trivy ${TRIVY_VERSION}..."
+        echo "Checking required tools..."
+        command -v curl
+        command -v tar
+        command -v docker
+
+        echo "Downloading Trivy ${TRIVY_VERSION}..."
         curl -fSL --retry 3 \
-          https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-          -o /tmp/install-trivy.sh
+          "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz" \
+          -o /tmp/trivy.tar.gz
 
-        sh /tmp/install-trivy.sh -b /usr/local/bin \
-          "v${TRIVY_VERSION}"
+        echo "Extracting Trivy..."
+        tar -xzf /tmp/trivy.tar.gz -C /tmp trivy
 
+        install -m 0755 /tmp/trivy /usr/local/bin/trivy
+
+        echo "Verifying Trivy..."
         trivy --version
         docker --version
-        python3 --version
+
 
   pre_build:
     commands:
