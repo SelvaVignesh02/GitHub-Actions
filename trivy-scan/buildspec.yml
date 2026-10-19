@@ -3,8 +3,8 @@ version: 0.2
 
 env:
   variables:
-    UI_IMAGE: "selvavignesh02/zomato:v2"
-    API_IMAGE: "selvavignesh02/image-optimized"
+    UI_IMAGE: "nginx:latest"
+    API_IMAGE: "node:22-bookworm-slim"
 
     MAX_CRITICAL: "0"
     MAX_HIGH: "5"
