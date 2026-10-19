@@ -4,7 +4,7 @@ version: 0.2
 env:
   variables:
     UI_IMAGE: "selvavignesh02/zomato:v2"
-    API_IMAGE: "selvavignesh02/petmanagement_backend"
+    API_IMAGE: "selvavignesh02/image-optimized"
 
     MAX_CRITICAL: "0"
     MAX_HIGH: "5"
