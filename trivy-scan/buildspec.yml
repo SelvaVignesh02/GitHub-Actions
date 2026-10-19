@@ -3,12 +3,14 @@ version: 0.2
 
 env:
   variables:
-    UI_IMAGE: "nginx:1.27.0"
-    API_IMAGE: "bkimminich/juice-shop:latest"
+    UI_IMAGE: "selvavignesh02/zomato:v2"
+    API_IMAGE: "selvavignesh02/petmanagement_backend"
 
     MAX_CRITICAL: "0"
     MAX_HIGH: "5"
     MAX_MEDIUM: "10"
+
+    TRIVY_IMAGE: "aquasec/trivy:0.70.0"
 
 phases:
   install:
@@ -16,89 +18,119 @@ phases:
       - |
         set -eu
 
-        mkdir -p reports/ui reports/api
+        mkdir -p reports/ui reports/api .trivy-cache
 
-        echo "Downloading Trivy installer..."
-        curl -fSL --retry 3 \
-          https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-          -o /tmp/install-trivy.sh
-
-        echo "Installing Trivy..."
-        sh /tmp/install-trivy.sh -b /usr/local/bin
-
-        echo "Verifying Trivy installation..."
-        command -v trivy
-        trivy --version
+        echo "Checking Docker..."
+        docker --version
+        docker info
 
         echo "Checking Python..."
         python3 --version
+
+        echo "Pulling Trivy scanner image..."
+        docker pull "${TRIVY_IMAGE}"
 
   pre_build:
     commands:
       - |
         set -eu
 
-        echo "========== IMAGE SCAN CONFIGURATION =========="
+        echo "========== DOCKER IMAGE SCAN CONFIGURATION =========="
         echo "UI image: ${UI_IMAGE}"
         echo "API image: ${API_IMAGE}"
         echo "Maximum CRITICAL: ${MAX_CRITICAL}"
         echo "Maximum HIGH: ${MAX_HIGH}"
         echo "Maximum MEDIUM: ${MAX_MEDIUM}"
 
-        echo "Checking Docker..."
-        docker --version
-
-        echo "Pulling UI image..."
-        docker pull "${UI_IMAGE}"
-
-        echo "Pulling API image..."
-        docker pull "${API_IMAGE}"
+        echo "Public Docker Hub images assumed."
+        echo "Image pulling will happen in the build phase."
 
   build:
     commands:
       - |
         set -u
 
-        # Scan an image and generate reports.
-        # Do not fail immediately when Trivy returns a non-zero status.
         scan_image() {
           NAME="$1"
           IMAGE="$2"
           DIR="reports/${NAME}"
 
+          mkdir -p "${DIR}"
+          rm -f "${DIR}/scan-error.txt" \
+                "${DIR}/trivy-results.json" \
+                "${DIR}/scan-exit-code.txt"
+
           echo ""
           echo "========== SCANNING ${NAME}: ${IMAGE} =========="
 
-          SCAN_STATUS=0
+          echo "Pulling image..."
+          if ! docker pull "${IMAGE}"; then
+            echo "Image pull failed: ${IMAGE}" |
+              tee "${DIR}/scan-error.txt"
+            echo "1" > "${DIR}/scan-exit-code.txt"
+            return 1
+          fi
 
-          trivy image \
-            --scanners vuln \
-            --format json \
-            --output "${DIR}/trivy-results.json" \
-            "${IMAGE}" || SCAN_STATUS=$?
+          echo "Running Trivy vulnerability scan..."
 
-          echo "${SCAN_STATUS}" > "${DIR}/scan-exit-code.txt"
+          if ! docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$(pwd)/${DIR}:/reports" \
+              -v "$(pwd)/.trivy-cache:/root/.cache/trivy" \
+              "${TRIVY_IMAGE}" \
+              image \
+              --image-src docker \
+              --scanners vuln \
+              --exit-code 0 \
+              --format json \
+              --output /reports/trivy-results.json \
+              "${IMAGE}"; then
+            echo "Trivy scan failed: ${IMAGE}" |
+              tee "${DIR}/scan-error.txt"
+            echo "1" > "${DIR}/scan-exit-code.txt"
+            return 1
+          fi
 
           if [ ! -s "${DIR}/trivy-results.json" ]; then
-            echo "ERROR: JSON report was not generated for ${IMAGE}" \
-              | tee "${DIR}/scan-error.txt"
+            echo "JSON report missing or empty: ${IMAGE}" |
+              tee "${DIR}/scan-error.txt"
+            echo "1" > "${DIR}/scan-exit-code.txt"
+            return 1
+          fi
+
+          if ! python3 -m json.tool \
+              "${DIR}/trivy-results.json" >/dev/null; then
+            echo "Invalid JSON report: ${IMAGE}" |
+              tee "${DIR}/scan-error.txt"
+            echo "1" > "${DIR}/scan-exit-code.txt"
             return 1
           fi
 
           echo "Generating TXT report..."
-          trivy convert \
+          docker run --rm \
+            -v "$(pwd)/${DIR}:/reports" \
+            -v "$(pwd)/.trivy-cache:/root/.cache/trivy" \
+            "${TRIVY_IMAGE}" \
+            convert \
             --format table \
-            --output "${DIR}/trivy-results.txt" \
-            "${DIR}/trivy-results.json" || true
+            --output /reports/trivy-results.txt \
+            /reports/trivy-results.json ||
+              echo "WARNING: TXT conversion failed."
 
           echo "Generating SARIF report..."
-          trivy convert \
+          docker run --rm \
+            -v "$(pwd)/${DIR}:/reports" \
+            -v "$(pwd)/.trivy-cache:/root/.cache/trivy" \
+            "${TRIVY_IMAGE}" \
+            convert \
             --format sarif \
-            --output "${DIR}/trivy-results.sarif" \
-            "${DIR}/trivy-results.json" || true
+            --output /reports/trivy-results.sarif \
+            /reports/trivy-results.json ||
+              echo "WARNING: SARIF conversion failed."
 
-          echo "Generating per-image summary..."
+          echo "0" > "${DIR}/scan-exit-code.txt"
 
+          echo "Generating image summary..."
           python3 - "${DIR}/trivy-results.json" \
             "${DIR}/scan-summary.txt" "${IMAGE}" <<'PY'
         import json
@@ -112,7 +144,6 @@ phases:
             data = json.load(f)
 
         counts = Counter()
-
         for result in data.get("Results") or []:
             for vuln in result.get("Vulnerabilities") or []:
                 counts[vuln.get("Severity", "UNKNOWN").upper()] += 1
@@ -120,37 +151,33 @@ phases:
         severities = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"]
 
         lines = [
-            "Trivy Image Vulnerability Scan Summary",
-            "======================================",
+            "Trivy Vulnerability Scan Summary",
+            "================================",
             f"Image: {image}",
-            f"Scan date (UTC): {datetime.now(timezone.utc).isoformat()}",
+            f"Scan date UTC: {datetime.now(timezone.utc).isoformat()}",
             f"Total vulnerabilities: {sum(counts.values())}",
-            ""
+            "",
         ]
+        lines.extend(f"{s}: {counts[s]}" for s in severities)
 
-        lines.extend(
-            f"{severity}: {counts[severity]}"
-            for severity in severities
-        )
-
+        report = "\n".join(lines) + "\n"
         with open(summary_file, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines) + "\n")
+            f.write(report)
 
-        print("\n".join(lines))
+        print(report)
         PY
 
           echo "Reports generated for ${IMAGE}:"
           ls -lh "${DIR}/"
-
           return 0
         }
 
-        # Attempt both scans, even if one scan fails.
+        # Run both scans even if one image fails.
         scan_image "ui" "${UI_IMAGE}" || true
         scan_image "api" "${API_IMAGE}" || true
 
         echo ""
-        echo "========== GENERATING COMBINED SUMMARY AND POLICY RESULT =========="
+        echo "========== CHECKING SECURITY THRESHOLDS =========="
 
         python3 - <<'PY'
         import json
@@ -163,14 +190,13 @@ phases:
             "MEDIUM": int(os.getenv("MAX_MEDIUM", "10")),
         }
 
-        overall_counts = Counter()
+        overall = Counter()
         errors = []
         violations = []
-
         lines = [
-            "Trivy Vulnerability Threshold Report",
-            "====================================",
-            ""
+            "Docker Image Vulnerability Report",
+            "=================================",
+            "",
         ]
 
         for name in ("ui", "api"):
@@ -181,17 +207,18 @@ phases:
 
             lines.append(f"Image: {name.upper()}")
 
-            scan_failed = (
+            failed = (
                 os.path.exists(error_file)
                 or not os.path.isfile(json_file)
             )
 
             if os.path.isfile(status_file):
                 with open(status_file, encoding="utf-8") as f:
-                    if f.read().strip() != "0":
-                        scan_failed = True
+                    failed = failed or f.read().strip() != "0"
+            else:
+                failed = True
 
-            if scan_failed:
+            if failed:
                 errors.append(name)
                 lines.extend(["Scan status: ERROR", ""])
                 continue
@@ -205,55 +232,44 @@ phases:
                 continue
 
             counts = Counter()
-
             for result in data.get("Results") or []:
                 for vuln in result.get("Vulnerabilities") or []:
                     counts[vuln.get("Severity", "UNKNOWN").upper()] += 1
 
             lines.append("Scan status: SUCCESS")
 
-            for severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"):
+            for severity in (
+                "CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"
+            ):
                 lines.append(f"{severity}: {counts[severity]}")
-                overall_counts[severity] += counts[severity]
+                overall[severity] += counts[severity]
 
-            for severity, limit in limits.items():
-                actual = counts[severity]
-
-                if actual > limit:
+            for severity, maximum in limits.items():
+                if counts[severity] > maximum:
                     violations.append(
-                        f"{name.upper()}: {severity} count {actual} "
-                        f"exceeds allowed maximum {limit}"
+                        f"{name.upper()}: {severity}={counts[severity]}, "
+                        f"maximum allowed={maximum}"
                     )
 
             lines.append("")
 
-        lines.extend([
-            "OVERALL VULNERABILITY COUNTS",
-            "----------------------------"
-        ])
-
+        lines.extend(["OVERALL COUNTS", "--------------"])
         for severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"):
-            lines.append(f"{severity}: {overall_counts[severity]}")
+            lines.append(f"{severity}: {overall[severity]}")
 
         lines.extend(["", "THRESHOLD VIOLATIONS"])
-
-        if violations:
-            lines.extend(f"FAIL: {item}" for item in violations)
-        else:
-            lines.append("None")
-
+        lines.extend([f"FAIL: {v}" for v in violations] or ["None"])
         lines.append(
             f"Scan errors: {', '.join(errors) if errors else 'None'}"
         )
 
         failed = bool(errors or violations)
-        lines.extend([
-            "",
-            f"POLICY RESULT: {'FAIL' if failed else 'PASS'}"
-        ])
+        lines.extend(["", f"POLICY RESULT: {'FAIL' if failed else 'PASS'}"])
 
         report = "\n".join(lines) + "\n"
         print(report)
+
+        os.makedirs("reports", exist_ok=True)
 
         with open("reports/combined-summary.txt", "w", encoding="utf-8") as f:
             f.write(report)
@@ -272,28 +288,26 @@ phases:
   post_build:
     commands:
       - |
-        echo "========== COMBINED SUMMARY =========="
+        echo "========== COMBINED SCAN SUMMARY =========="
         cat reports/combined-summary.txt 2>/dev/null || true
 
         echo ""
-        echo "========== SECURITY POLICY =========="
+        echo "========== SECURITY POLICY RESULT =========="
         cat reports/policy-result.txt 2>/dev/null || true
 
         echo ""
-        echo "========== FINAL REPORT FILES =========="
-        find reports -type f -exec ls -lh {} \;
-
-        echo "Reports generated. CodeBuild will attempt artifact upload."
+        echo "========== REPORT FILES =========="
+        find reports -type f -exec ls -lh {} \; 2>/dev/null || true
 
         if [ "$(cat reports/build-exit-code.txt 2>/dev/null || echo 1)" != "0" ]; then
           echo "BUILD FAILED: Scan error or vulnerability threshold exceeded."
           exit 1
         fi
 
-        echo "BUILD PASSED: All image scans are within configured thresholds."
+        echo "BUILD PASSED: Both images meet the configured thresholds."
 
 artifacts:
   files:
     - "reports/**/*"
-  name: trivy-scan-reports
+  name: "docker-image-trivy-reports"
   discard-paths: no
