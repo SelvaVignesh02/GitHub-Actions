@@ -10,28 +10,9 @@ env:
 phases:
   install:
     commands:
-      - |
-        set -eu
-
-        echo "========== PREPARING ENVIRONMENT =========="
-
-        mkdir -p reports/ui reports/api .trivy-cache
-
-        docker --version
-        docker info
-        python3 --version
-
-        echo "Pulling Trivy scanner image..."
-        docker pull "${TRIVY_IMAGE}"
-
-  pre_build:
-    commands:
-      - |
-        set -eu
-
-        echo "========== SCAN CONFIGURATION =========="
-        echo "UI image  : ${UI_IMAGE}"
-        echo "API image : ${API_IMAGE}"
+      - mkdir -p reports/ui reports/api .trivy-cache
+      - docker --version
+      - docker pull "${TRIVY_IMAGE}"
 
   build:
     commands:
@@ -43,21 +24,12 @@ phases:
           IMAGE="$2"
           DIR="reports/${NAME}"
 
-          mkdir -p "${DIR}"
+          echo "========== Scanning ${IMAGE} =========="
 
-          rm -f "${DIR}/trivy-results.json" \
-                "${DIR}/trivy-results.txt"
-
-          echo ""
-          echo "=========================================="
-          echo "SCANNING ${NAME}: ${IMAGE}"
-          echo "=========================================="
-
-          echo "Pulling Docker image..."
+          # Pull the image
           docker pull "${IMAGE}"
 
-          echo "Generating JSON report..."
-
+          # Generate JSON report
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$(pwd)/${DIR}:/reports" \
@@ -66,20 +38,11 @@ phases:
             image \
             --image-src docker \
             --scanners vuln \
-            --exit-code 0 \
             --format json \
             --output /reports/trivy-results.json \
             "${IMAGE}"
 
-          echo "Validating JSON report..."
-
-          test -s "${DIR}/trivy-results.json"
-
-          python3 -m json.tool \
-            "${DIR}/trivy-results.json" > /dev/null
-
-          echo "Generating TXT vulnerability table..."
-
+          # Convert JSON report to TXT table
           docker run --rm \
             -v "$(pwd)/${DIR}:/reports" \
             -v "$(pwd)/.trivy-cache:/root/.cache/trivy" \
@@ -89,101 +52,26 @@ phases:
             --output /reports/trivy-results.txt \
             /reports/trivy-results.json
 
-          test -s "${DIR}/trivy-results.txt"
+          echo "JSON: ${DIR}/trivy-results.json"
+          echo "TXT : ${DIR}/trivy-results.txt"
 
-          echo ""
-          echo "========== ${NAME} SCAN RESULTS =========="
-
-          echo "JSON report: ${DIR}/trivy-results.json"
-          echo "TXT report : ${DIR}/trivy-results.txt"
-
-          echo ""
+          # Display the TXT report in CodeBuild logs
           cat "${DIR}/trivy-results.txt"
         }
 
-        echo "========== SCANNING UI IMAGE =========="
         scan_image "ui" "${UI_IMAGE}"
-
-        echo ""
-        echo "========== SCANNING API IMAGE =========="
         scan_image "api" "${API_IMAGE}"
-
-        echo ""
-        echo "========== SCAN SUMMARY =========="
-
-        python3 <<'PY'
-        import json
-        from collections import Counter
-
-        print(
-            f"{'IMAGE':<10} {'CRITICAL':>10} {'HIGH':>10} "
-            f"{'MEDIUM':>10} {'LOW':>10} {'UNKNOWN':>10} {'TOTAL':>10}"
-        )
-        print("-" * 82)
-
-        overall = Counter()
-
-        for name in ("ui", "api"):
-            path = f"reports/{name}/trivy-results.json"
-
-            with open(path, encoding="utf-8") as f:
-                report = json.load(f)
-
-            counts = Counter()
-
-            for result in report.get("Results") or []:
-                for vuln in result.get("Vulnerabilities") or []:
-                    severity = vuln.get("Severity", "UNKNOWN").upper()
-                    counts[severity] += 1
-
-            for severity in (
-                "CRITICAL", "HIGH", "MEDIUM", "LOW", "UNKNOWN"
-            ):
-                overall[severity] += counts[severity]
-
-            print(
-                f"{name.upper():<10} "
-                f"{counts['CRITICAL']:>10} "
-                f"{counts['HIGH']:>10} "
-                f"{counts['MEDIUM']:>10} "
-                f"{counts['LOW']:>10} "
-                f"{counts['UNKNOWN']:>10} "
-                f"{sum(counts.values()):>10}"
-            )
-
-        print("-" * 82)
-        print(
-            f"{'TOTAL':<10} "
-            f"{overall['CRITICAL']:>10} "
-            f"{overall['HIGH']:>10} "
-            f"{overall['MEDIUM']:>10} "
-            f"{overall['LOW']:>10} "
-            f"{overall['UNKNOWN']:>10} "
-            f"{sum(overall.values()):>10}"
-        )
-        PY
 
   post_build:
     commands:
-      - |
-        echo ""
-        echo "========== GENERATED REPORT FILES =========="
-
-        find reports -type f -exec ls -lh {} \;
-
-        echo ""
-        echo "========== UI TXT REPORT =========="
-        cat reports/ui/trivy-results.txt
-
-        echo ""
-        echo "========== API TXT REPORT =========="
-        cat reports/api/trivy-results.txt
+      - echo "========== Generated Trivy Reports =========="
+      - find reports -type f -print
 
 artifacts:
   files:
-    - "reports/ui/trivy-results.json"
-    - "reports/ui/trivy-results.txt"
-    - "reports/api/trivy-results.json"
-    - "reports/api/trivy-results.txt"
-  name: "trivy-image-scan-reports"
+    - reports/ui/trivy-results.json
+    - reports/ui/trivy-results.txt
+    - reports/api/trivy-results.json
+    - reports/api/trivy-results.txt
+  name: trivy-scan-reports
   discard-paths: no
