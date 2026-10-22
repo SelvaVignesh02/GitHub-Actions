@@ -1,0 +1,52 @@
+
+name: Push Juice Shop Image to AWS ECR Repo
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REPOSITORY: selva/trivy
+  SOURCE_IMAGE: bkimminich/juice-shop:latest
+
+jobs:
+  push-image:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Pull Juice Shop image
+        run: docker pull "$SOURCE_IMAGE"
+
+      - name: Tag image for ECR
+        run: |
+          docker tag "$SOURCE_IMAGE" \
+            820345161776.dkr.ecr.ap-south-1.amazonaws.com/selva/trivy:latest
+
+      - name: Push image to ECR
+        run: |
+          docker push \
+            820345161776.dkr.ecr.ap-south-1.amazonaws.com/selva/trivy:latest
+
+      - name: Verify image in ECR
+        run: |
+          aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag=latest \
+            --region "$AWS_REGION"
