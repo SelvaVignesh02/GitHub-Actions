@@ -1,52 +1,106 @@
 
-name: Push Juice Shop Image to AWS ECR Repo
+name: Trivy Docker Image Scan
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 permissions:
   contents: read
-  id-token: write
-
-env:
-  AWS_REGION: ap-south-1
-  ECR_REPOSITORY: selva/trivy
-  SOURCE_IMAGE: bkimminich/juice-shop:latest
 
 jobs:
-  push-image:
+  trivy-scan:
+    name: Scan UI and API Images
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      # 1. Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+      # 2. Install Trivy
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.3
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
+          version: '0.70.0'
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Pull Juice Shop image
-        run: docker pull "$SOURCE_IMAGE"
-
-      - name: Tag image for ECR
+      # 3. Prepare report directories
+      - name: Create Report Directories
         run: |
-          docker tag "$SOURCE_IMAGE" \
-            820345161776.dkr.ecr.ap-south-1.amazonaws.com/selva/trivy:latest
+          mkdir -p reports/ui
+          mkdir -p reports/api
 
-      - name: Push image to ECR
+      # 4. Download HTML template
+      - name: Download Trivy HTML Template
         run: |
-          docker push \
-            820345161776.dkr.ecr.ap-south-1.amazonaws.com/selva/trivy:latest
+          curl -fsSL \
+            https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl \
+            -o html.tpl
 
-      - name: Verify image in ECR
+          test -s html.tpl
+
+      # 5. Scan UI Docker image
+      - name: Scan UI Image
         run: |
-          aws ecr describe-images \
-            --repository-name "$ECR_REPOSITORY" \
-            --image-ids imageTag=latest \
-            --region "$AWS_REGION"
+          trivy image \
+            --scanners vuln \
+            --format json \
+            --output reports/ui/trivy-results.json \
+            selvavignesh02/zomato:v2
+
+          trivy convert \
+            --format table \
+            --output reports/ui/trivy-results.txt \
+            reports/ui/trivy-results.json
+
+          trivy convert \
+            --format template \
+            --template "@html.tpl" \
+            --output reports/ui/trivy-results.html \
+            reports/ui/trivy-results.json
+
+      # 6. Scan API Docker image
+      - name: Scan API Image
+        run: |
+          trivy image \
+            --scanners vuln \
+            --format json \
+            --output reports/api/trivy-results.json \
+            selvavignesh02/petmanagement_backend
+
+          trivy convert \
+            --format table \
+            --output reports/api/trivy-results.txt \
+            reports/api/trivy-results.json
+
+          trivy convert \
+            --format template \
+            --template "@html.tpl" \
+            --output reports/api/trivy-results.html \
+            reports/api/trivy-results.json
+
+      # 7. Display TXT reports in workflow logs
+      - name: Display Scan Summary
+        if: always()
+        run: |
+          echo "========== UI Scan Report =========="
+          if [ -f reports/ui/trivy-results.txt ]; then
+            cat reports/ui/trivy-results.txt
+          fi
+
+          echo "========== API Scan Report =========="
+          if [ -f reports/api/trivy-results.txt ]; then
+            cat reports/api/trivy-results.txt
+          fi
+
+      # 8. Upload reports as downloadable artifacts
+      - name: Upload Trivy Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-scan-reports
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 30
