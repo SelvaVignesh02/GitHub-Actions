@@ -21,10 +21,10 @@ jobs:
         uses: actions/checkout@v4
 
       # 2. Install Trivy
-      - name: Install Trivy
-        uses: aquasecurity/setup-trivy@v0.3.1
-        with:
-          version: '0.70.0'
+      - name: Pull Trivy Scanner
+        run: |
+          docker pull aquasec/trivy:0.70.0
+          docker run --rm aquasec/trivy:0.70.0 --version
 
       # 3. Prepare report directories
       - name: Create Report Directories
