@@ -44,17 +44,19 @@ jobs:
       # 5. Scan UI Docker image
       - name: Scan UI Image
         run: |
+          mkdir -p reports/ui
+      
           trivy image \
             --scanners vuln \
             --format json \
             --output reports/ui/trivy-results.json \
             selvavignesh02/zomato:v2
-
+      
           trivy convert \
             --format table \
             --output reports/ui/trivy-results.txt \
             reports/ui/trivy-results.json
-
+      
           trivy convert \
             --format template \
             --template "@html.tpl" \
@@ -64,23 +66,25 @@ jobs:
       # 6. Scan API Docker image
       - name: Scan API Image
         run: |
+          mkdir -p reports/api
+      
           trivy image \
             --scanners vuln \
             --format json \
             --output reports/api/trivy-results.json \
             selvavignesh02/petmanagement_backend
-
+      
           trivy convert \
             --format table \
             --output reports/api/trivy-results.txt \
             reports/api/trivy-results.json
-
+      
           trivy convert \
             --format template \
             --template "@html.tpl" \
             --output reports/api/trivy-results.html \
             reports/api/trivy-results.json
-
+      
       # 7. Display TXT reports in workflow logs
       - name: Display Scan Summary
         if: always()
