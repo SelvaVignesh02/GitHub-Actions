@@ -1,0 +1,106 @@
+
+name: Trivy Docker Image Scan
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  trivy-scan:
+    name: Scan UI and API Images
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Checkout repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # 2. Install Trivy
+      - name: Install Trivy
+        uses: aquasecurity/setup-trivy@v0.2.3
+        with:
+          version: '0.70.0'
+
+      # 3. Prepare report directories
+      - name: Create Report Directories
+        run: |
+          mkdir -p reports/ui
+          mkdir -p reports/api
+
+      # 4. Download HTML template
+      - name: Download Trivy HTML Template
+        run: |
+          curl -fsSL \
+            https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl \
+            -o html.tpl
+
+          test -s html.tpl
+
+      # 5. Scan UI Docker image
+      - name: Scan UI Image
+        run: |
+          trivy image \
+            --scanners vuln \
+            --format json \
+            --output reports/ui/trivy-results.json \
+            selvavignesh02/zomato:v2
+
+          trivy convert \
+            --format table \
+            --output reports/ui/trivy-results.txt \
+            reports/ui/trivy-results.json
+
+          trivy convert \
+            --format template \
+            --template "@html.tpl" \
+            --output reports/ui/trivy-results.html \
+            reports/ui/trivy-results.json
+
+      # 6. Scan API Docker image
+      - name: Scan API Image
+        run: |
+          trivy image \
+            --scanners vuln \
+            --format json \
+            --output reports/api/trivy-results.json \
+            selvavignesh02/petmanagement_backend
+
+          trivy convert \
+            --format table \
+            --output reports/api/trivy-results.txt \
+            reports/api/trivy-results.json
+
+          trivy convert \
+            --format template \
+            --template "@html.tpl" \
+            --output reports/api/trivy-results.html \
+            reports/api/trivy-results.json
+
+      # 7. Display TXT reports in workflow logs
+      - name: Display Scan Summary
+        if: always()
+        run: |
+          echo "========== UI Scan Report =========="
+          if [ -f reports/ui/trivy-results.txt ]; then
+            cat reports/ui/trivy-results.txt
+          fi
+
+          echo "========== API Scan Report =========="
+          if [ -f reports/api/trivy-results.txt ]; then
+            cat reports/api/trivy-results.txt
+          fi
+
+      # 8. Upload reports as downloadable artifacts
+      - name: Upload Trivy Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-scan-reports
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 30
